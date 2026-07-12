@@ -1,6 +1,5 @@
 {
   "name": "fileshub",
-<<<<<<< HEAD
   "version": "2.0.0",
   "type": "module",
   "description": "基于 Cloudflare Workers + GitHub 多仓库的文件床系统",
@@ -19,19 +18,5 @@
   "license": "MIT",
   "devDependencies": {
     "wrangler": "^3.0.0"
-=======
-  "version": "1.0.0",
-  "description": "基于 GitHub 私有仓库 + Cloudflare Workers 的文件床",
-  "private": true,
-  "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail",
-    "secret:token": "wrangler secret put GITHUB_TOKEN",
-    "secret:auth": "wrangler secret put AUTH_TOKEN"
-  },
-  "devDependencies": {
-    "wrangler": "^3.90.0"
->>>>>>> 956176d14c8744fc5056b0c98a323ee4d5e39d36
   }
 }
