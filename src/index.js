@@ -1,9 +1,3 @@
-/**
- * @file Worker 主入口文件
- * @description FilesHub 文件床系统主入口，负责路由分发、认证中间件、初始化引导。
- *              基于 Cloudflare Workers + GitHub 多仓库的文件床系统。
- */
-
 import {
   jsonResponse,
   errorResponse,
@@ -16,9 +10,8 @@ import {
   formatBytes,
   encryptToken,
   decryptToken,
-  sha256,
+  sha256
 } from './utils.js';
-
 import {
   getSystemConfig,
   setSystemConfig,
@@ -31,774 +24,484 @@ import {
   getFileIndex,
   addFileEntry,
   removeFileEntry,
-  findFileEntry,
+  findFileEntry
 } from './kv.js';
-
-import {
-  handleLogin,
-  handleLogout,
-  authMiddleware,
-} from './auth.js';
-
+import { handleLogin, handleLogout, authMiddleware } from './auth.js';
 import {
   selectRepoForUpload,
   handleReposRequest,
   handleRepoStatusRequest,
   handleRepoUpdateRequest,
-  handleRepoDeleteRequest,
+  handleRepoDeleteRequest
 } from './repo-manager.js';
-
-import {
-  uploadFile,
-  downloadFile,
-  deleteFile,
-} from './github.js';
-
+import { uploadFile, downloadFile, deleteFile } from './github.js';
 import { renderUI } from './ui.js';
 
-// ===========================================================================
-// 辅助函数
-// ===========================================================================
-
 /**
- * 认证检查辅助函数，统一处理登录验证和管理员权限验证
+ * 认证检查辅助函数
  * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @param {boolean} requireAdmin - 是否需要管理员权限
- * @returns {Promise<{auth: Object|null, error: Response|null}>}
- *   auth 为认证信息对象 { authenticated, username, role }，error 为错误响应
+ * @param {Object} env - Worker 环境变量
+ * @param {boolean} requireAdmin - 是否要求管理员权限
+ * @returns {{auth:Object|null, error:Response|null}}
  */
 async function checkAuth(request, env, requireAdmin = false) {
   const auth = await authMiddleware(request, env);
+
   if (!auth || !auth.authenticated) {
-    return { auth: null, error: errorResponse('未登录或会话已过期', 401) };
+    return { auth: null, error: errorResponse('未登录', 401) };
   }
+
   if (requireAdmin && auth.role !== 'admin') {
-    return { auth: null, error: errorResponse('权限不足，需要管理员权限', 403) };
+    return { auth: null, error: errorResponse('权限不足', 403) };
   }
+
   return { auth, error: null };
 }
 
-// ===========================================================================
-// 路由处理函数 — 初始化引导
-// ===========================================================================
-
 /**
- * GET /api/setup/status — 检查系统是否已初始化
- * @param {Object} env - 环境变量
- * @returns {Promise<Response>}
+ * 获取系统初始化状态
  */
 async function handleSetupStatus(env) {
   const config = await getSystemConfig(env);
   return jsonResponse({
     success: true,
-    initialized: config.initialized,
-    site_title: config.site_title,
+    initialized: config.initialized || false,
+    site_title: config.site_title || env.SITE_TITLE || 'FilesHub'
   });
 }
 
 /**
- * POST /api/setup — 首次初始化系统（创建管理员账号 + 首个仓库）
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @returns {Promise<Response>}
+ * 系统初始化设置
  */
 async function handleSetup(request, env) {
-  // 检查是否已初始化
   const config = await getSystemConfig(env);
   if (config.initialized) {
-    return errorResponse('系统已初始化，请勿重复操作', 403);
+    return errorResponse('系统已初始化', 403);
   }
 
-  // 解析请求体
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse('请求体格式错误，需要合法 JSON', 400);
-  }
-
+  const body = await request.json();
   const { admin_username, admin_password, site_title, first_repo } = body;
-
-  // 参数校验
-  if (!admin_username || !admin_password) {
-    return errorResponse('管理员用户名和密码不能为空', 400);
-  }
-  if (!first_repo || !first_repo.owner || !first_repo.repo) {
-    return errorResponse('首个仓库配置不完整，需要 owner 和 repo 字段', 400);
-  }
 
   // 创建管理员用户
   const passwordHash = await sha256(admin_password);
   await createUser(env, admin_username, passwordHash, 'admin');
 
-  // 加密首个仓库的 GitHub Token
-  const encryptedToken = first_repo.token
-    ? await encryptToken(first_repo.token, env.AUTH_TOKEN)
-    : '';
+  // 加密首个仓库的 token
+  let encryptedToken = '';
+  if (first_repo && first_repo.token) {
+    encryptedToken = encryptToken(first_repo.token, env.AUTH_TOKEN);
+  }
 
   // 创建首个仓库
-  const now = new Date().toISOString();
   await createRepo(env, admin_username, {
     ...first_repo,
     token: encryptedToken,
     priority: 1,
     enabled: true,
-    created_at: now,
+    created_at: new Date().toISOString()
   });
 
-  // 更新系统配置为已初始化
+  // 标记系统已初始化
   await setSystemConfig(env, {
     initialized: true,
-    site_title: site_title || 'FilesHub',
+    site_title
   });
 
-  return jsonResponse({ success: true, message: '初始化完成' });
+  return jsonResponse({ success: true });
 }
 
-// ===========================================================================
-// 路由处理函数 — 认证
-// ===========================================================================
-
 /**
- * GET /api/verify — 验证当前会话状态
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @returns {Promise<Response>}
+ * 验证当前登录状态
  */
 async function handleVerify(request, env) {
   const auth = await authMiddleware(request, env);
-  if (auth && auth.authenticated) {
-    return jsonResponse({
-      success: true,
-      username: auth.username,
-      role: auth.role,
-    });
+  if (!auth || !auth.authenticated) {
+    return errorResponse('未登录', 401);
   }
-  return errorResponse('未登录或会话已过期', 401, { success: false });
+  return jsonResponse({
+    success: true,
+    username: auth.username,
+    role: auth.role
+  });
 }
 
-// ===========================================================================
-// 路由处理函数 — 用户管理（管理员）
-// ===========================================================================
-
 /**
- * GET /api/users — 获取用户列表（管理员）
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @returns {Promise<Response>}
+ * 获取用户列表（管理员）
  */
 async function handleUsersList(request, env) {
   const { auth, error } = await checkAuth(request, env, true);
   if (error) return error;
 
-  const usernameList = await getUserList(env);
-  const users = [];
-  for (const username of usernameList) {
-    const user = await getUser(env, username);
-    if (user) {
-      // 不返回密码哈希
-      users.push({
-        username: user.username,
-        role: user.role,
-        created_at: user.created_at,
-      });
-    }
-  }
-
-  return jsonResponse({ success: true, users });
+  const users = await getUserList(env);
+  const safeUsers = users.map(u => ({
+    username: u.username,
+    role: u.role,
+    created_at: u.created_at
+  }));
+  return jsonResponse({ success: true, users: safeUsers });
 }
 
 /**
- * POST /api/users — 创建用户（管理员）
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @returns {Promise<Response>}
+ * 创建用户（管理员）
  */
 async function handleUserCreate(request, env) {
   const { auth, error } = await checkAuth(request, env, true);
   if (error) return error;
 
-  // 解析请求体
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse('请求体格式错误，需要合法 JSON', 400);
-  }
-
+  const body = await request.json();
   const { username, password, role } = body;
 
-  if (!username || !password) {
-    return errorResponse('用户名和密码不能为空', 400);
-  }
-
-  // 检查用户名是否已存在
   const existing = await getUser(env, username);
   if (existing) {
-    return errorResponse('用户名已存在', 409);
+    return errorResponse('用户已存在', 409);
   }
 
-  // 创建用户
   const passwordHash = await sha256(password);
   await createUser(env, username, passwordHash, role || 'user');
-
-  return jsonResponse({ success: true, message: '用户创建成功' });
+  return jsonResponse({ success: true });
 }
 
 /**
- * DELETE /api/users/{name} — 删除用户（管理员）
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @param {string} username - 要删除的用户名
- * @returns {Promise<Response>}
+ * 删除用户（管理员）
  */
-async function handleUserDelete(request, env, username) {
+async function handleUserDelete(request, env, targetUsername) {
   const { auth, error } = await checkAuth(request, env, true);
   if (error) return error;
 
-  // 不能删除自己
-  if (auth.username === username) {
-    return errorResponse('不能删除当前登录的用户', 400);
+  if (auth.username === targetUsername) {
+    return errorResponse('不能删除自己', 400);
   }
 
-  // 检查目标用户是否存在
-  const targetUser = await getUser(env, username);
-  if (!targetUser) {
-    return errorResponse('用户不存在', 404);
-  }
-
-  await deleteUser(env, username);
-  return jsonResponse({ success: true, message: '用户删除成功' });
+  await deleteUser(env, targetUsername);
+  return jsonResponse({ success: true });
 }
 
-// ===========================================================================
-// 路由处理函数 — 文件操作
-// ===========================================================================
-
 /**
- * POST /api/upload — 上传文件（已认证）
- * 支持 multipart/form-data（多文件）和 raw body（单文件）两种模式。
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @param {Object} ctx - 执行上下文
- * @returns {Promise<Response>}
+ * 文件上传
+ * 支持 multipart/form-data 或 raw body
  */
 async function handleUpload(request, env, ctx) {
-  const { auth, error } = await checkAuth(request, env, false);
+  const { auth, error } = await checkAuth(request, env);
   if (error) return error;
-  const { username } = auth;
 
-  const url = new URL(request.url);
   const contentType = request.headers.get('Content-Type') || '';
-
-  // 收集待上传文件
+  const results = [];
   const files = [];
 
   if (contentType.includes('multipart/form-data')) {
-    // multipart/form-data 模式 — 支持多文件上传
     const formData = await request.formData();
-    const customDir = formData.get('dir') || formData.get('custom_dir') || '';
-
-    for (const [, value] of formData.entries()) {
+    for (const [key, value] of formData.entries()) {
       if (value instanceof File) {
         files.push({
           name: value.name,
-          buffer: await value.arrayBuffer(),
-          customDir: customDir || '',
+          size: value.size,
+          content: await value.arrayBuffer()
         });
       }
     }
   } else {
-    // raw body 模式 — 单文件上传
-    const buffer = await request.arrayBuffer();
-    const filename =
-      request.headers.get('X-File-Name') ||
-      url.searchParams.get('filename') ||
-      'upload';
-    const customDir = url.searchParams.get('dir') || '';
-    files.push({ name: filename, buffer, customDir });
+    // Raw body 单文件上传
+    const content = await request.arrayBuffer();
+    const filename = request.headers.get('X-File-Name') || `upload-${Date.now()}`;
+    files.push({
+      name: filename,
+      size: content.byteLength,
+      content
+    });
   }
 
-  if (files.length === 0) {
-    return errorResponse('未检测到上传文件', 400);
-  }
-
-  // 逐个文件处理
-  const results = [];
   for (const file of files) {
     try {
-      const fileSize = file.buffer.byteLength;
-
-      // 选择仓库
-      const repoConfig = await selectRepoForUpload(env, username, fileSize);
+      // 选择可用仓库
+      const repoConfig = await selectRepoForUpload(env, auth.username, file.size);
       if (!repoConfig) {
-        results.push({
-          name: file.name,
-          success: false,
-          error: '没有可用的仓库（可能容量已满或未配置仓库）',
-        });
+        results.push({ name: file.name, success: false, error: '无可用仓库' });
         continue;
       }
 
-      // 解密仓库 token
-      let decryptedToken = '';
-      if (repoConfig.token) {
-        decryptedToken = await decryptToken(repoConfig.token, env.AUTH_TOKEN);
-      }
-
-      // 生成文件存储路径
-      const filePath = generateFilePath(file.name, file.customDir);
-
-      // 路径安全检查
-      if (!isSafePath(filePath)) {
-        results.push({
-          name: file.name,
-          success: false,
-          error: '生成的文件路径不安全',
-        });
-        continue;
-      }
-
-      // 构建 GitHub API 用的仓库配置（使用解密后的 token）
-      const repoConfigForGithub = {
+      // 解密 token
+      const token = decryptToken(repoConfig.token, env.AUTH_TOKEN);
+      const githubConfig = {
         owner: repoConfig.owner,
         repo: repoConfig.repo,
         branch: repoConfig.branch,
-        token: decryptedToken,
-        is_public: repoConfig.is_public,
+        token,
+        is_public: repoConfig.is_public
       };
+
+      // 生成文件路径并检查安全性
+      const filePath = generateFilePath(file.name);
+      if (!isSafePath(filePath)) {
+        results.push({ name: file.name, success: false, error: '文件路径不安全' });
+        continue;
+      }
 
       // 上传文件到 GitHub
-      const uploadResult = await uploadFile(
-        repoConfigForGithub,
-        file.buffer,
-        filePath,
-        `Upload ${file.name}`,
-      );
+      await uploadFile(env, githubConfig, filePath, file.content);
 
       // 记录文件索引
-      const now = new Date().toISOString();
-      const entry = {
-        path: uploadResult.path || filePath,
+      await addFileEntry(env, {
+        path: filePath,
         name: file.name,
-        repo_id: repoConfig.id,
-        size: uploadResult.size || fileSize,
-        sha: uploadResult.sha,
-        uploaded_at: now,
-      };
-      await addFileEntry(env, username, entry);
+        size: file.size,
+        owner: repoConfig.owner,
+        repo: repoConfig.repo,
+        branch: repoConfig.branch,
+        username: auth.username,
+        created_at: new Date().toISOString()
+      });
 
-      // 存储文件映射到 KV（供 /raw/ 公开下载使用）
-      await env.FILESHUB_KV.put(
-        `filemap:${entry.path}`,
-        JSON.stringify({
-          owner: repoConfig.owner,
-          repo: repoConfig.repo,
-          branch: repoConfig.branch,
-          token_encrypted: repoConfig.token,
-          is_public: repoConfig.is_public,
-        }),
-      );
+      // 写入 filemap KV（存储仓库映射和加密 token）
+      await env.FILESHUB_KV.put('filemap:' + filePath, JSON.stringify({
+        owner: repoConfig.owner,
+        repo: repoConfig.repo,
+        branch: repoConfig.branch,
+        token_encrypted: repoConfig.token,
+        is_public: repoConfig.is_public
+      }));
 
       results.push({
         name: file.name,
         success: true,
-        path: entry.path,
-        size: entry.size,
-        sha: entry.sha,
-        raw_url: `/raw/${entry.path}`,
+        path: filePath,
+        size: file.size,
+        raw_url: `/raw/${filePath}`
       });
     } catch (err) {
-      console.error('[Upload Error]', file.name, err);
-      results.push({
-        name: file.name,
-        success: false,
-        error: err.message,
-      });
+      results.push({ name: file.name, success: false, error: err.message });
     }
   }
 
-  const successCount = results.filter((r) => r.success).length;
-  const allSuccess = successCount === results.length;
-  const anySuccess = successCount > 0;
-
-  return jsonResponse({
-    success: anySuccess,
-    message: `上传完成: ${successCount}/${results.length} 个文件成功`,
-    results,
-  }, allSuccess ? 200 : (anySuccess ? 207 : 500));
+  return jsonResponse({ success: true, results });
 }
 
 /**
- * GET /api/list — 获取文件列表（已认证）
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @returns {Promise<Response>}
+ * 获取文件列表
  */
 async function handleList(request, env) {
-  const { auth, error } = await checkAuth(request, env, false);
+  const { auth, error } = await checkAuth(request, env);
   if (error) return error;
 
-  const files = await getFileIndex(env, auth.username);
-
-  // 为每个文件添加展示用的附加字段
-  const fileList = files.map((file) => ({
-    ...file,
-    raw_url: `/raw/${file.path}`,
-    is_image: isImage(file.name),
-    is_video: isVideo(file.name),
-    size_formatted: formatBytes(file.size),
+  const files = await getFileIndex(env);
+  const fileList = files.map(f => ({
+    ...f,
+    raw_url: `/raw/${f.path}`,
+    is_image: isImage(f.name),
+    is_video: isVideo(f.name),
+    size_formatted: formatBytes(f.size)
   }));
 
   return jsonResponse({ success: true, files: fileList });
 }
 
 /**
- * DELETE /api/delete/{path} — 删除文件（已认证）
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量
- * @param {string} filePath - 文件路径
- * @returns {Promise<Response>}
+ * 删除文件
  */
 async function handleDelete(request, env, filePath) {
-  const { auth, error } = await checkAuth(request, env, false);
+  const { auth, error } = await checkAuth(request, env);
   if (error) return error;
-  const { username } = auth;
 
-  if (!filePath) {
-    return errorResponse('文件路径不能为空', 400);
-  }
-
-  // 查找文件索引
-  const entry = await findFileEntry(env, username, filePath);
-  if (!entry) {
+  // 查找文件条目，确认文件存在
+  const fileEntry = await findFileEntry(env, filePath);
+  if (!fileEntry) {
     return errorResponse('文件不存在', 404);
   }
 
-  // 获取文件所在仓库的配置
-  const repos = await getAllRepos(env, username);
-  const repoConfig = repos.find((r) => r.id === entry.repo_id);
-  if (!repoConfig) {
-    return errorResponse('文件所在的仓库配置不存在', 404);
+  // 从 filemap KV 获取仓库映射（含加密 token）
+  const filemap = await env.FILESHUB_KV.get('filemap:' + filePath, 'json');
+  if (!filemap) {
+    return errorResponse('文件映射不存在', 404);
   }
 
-  // 解密仓库 token
-  let decryptedToken = '';
-  if (repoConfig.token) {
-    decryptedToken = await decryptToken(repoConfig.token, env.AUTH_TOKEN);
-  }
-
-  const repoConfigForGithub = {
-    owner: repoConfig.owner,
-    repo: repoConfig.repo,
-    branch: repoConfig.branch,
-    token: decryptedToken,
-    is_public: repoConfig.is_public,
+  // 解密 token
+  const token = decryptToken(filemap.token_encrypted, env.AUTH_TOKEN);
+  const githubConfig = {
+    owner: filemap.owner,
+    repo: filemap.repo,
+    branch: filemap.branch,
+    token,
+    is_public: filemap.is_public
   };
 
   // 从 GitHub 删除文件
-  try {
-    await deleteFile(repoConfigForGithub, entry.path, `Delete ${entry.name}`);
-  } catch (err) {
-    console.error('[Delete File Error]', err);
-    return errorResponse(`从仓库删除文件失败: ${err.message}`, 500);
-  }
+  await deleteFile(env, githubConfig, filePath);
 
   // 移除文件索引
-  await removeFileEntry(env, username, filePath);
+  await removeFileEntry(env, filePath);
 
-  // 删除文件映射
-  try {
-    await env.FILESHUB_KV.delete(`filemap:${filePath}`);
-  } catch (err) {
-    console.error('[Delete FileMap Error]', err);
-  }
+  // 删除 filemap KV
+  await env.FILESHUB_KV.delete('filemap:' + filePath);
 
-  return jsonResponse({ success: true, message: '文件删除成功' });
+  return jsonResponse({ success: true });
 }
 
-// ===========================================================================
-// 路由处理函数 — 公开访问
-// ===========================================================================
-
 /**
- * GET /raw/{path} — 公开下载文件（CDN 缓存）
- * 不需要用户认证，通过 KV 中的 filemap 映射定位文件所在仓库。
- * @param {Object} env - 环境变量
- * @param {Object} ctx - 执行上下文
- * @param {string} filePath - 文件路径
- * @returns {Promise<Response>}
+ * 原始文件访问（公开）
+ * 支持 CDN 缓存
  */
 async function handleRaw(env, ctx, filePath) {
-  if (!filePath) {
-    return errorResponse('文件路径不能为空', 400);
-  }
-
   // CDN 缓存检查
-  const cacheKey = new Request(`https://fileshub.cache/${filePath}`);
+  const cacheKey = new Request('https://fileshub.cache/raw/' + filePath, { method: 'GET' });
   const cached = await caches.default.match(cacheKey);
   if (cached) {
     return cached;
   }
 
-  // 从 KV 读取文件映射
-  const fileMap = await env.FILESHUB_KV.get(`filemap:${filePath}`, 'json');
-  if (!fileMap) {
+  // 从 filemap KV 获取仓库映射
+  const filemap = await env.FILESHUB_KV.get('filemap:' + filePath, 'json');
+  if (!filemap) {
     return errorResponse('文件不存在', 404);
   }
 
-  // 解密仓库 token
-  let decryptedToken = '';
-  if (fileMap.token_encrypted) {
-    decryptedToken = await decryptToken(fileMap.token_encrypted, env.AUTH_TOKEN);
-  }
-
-  const repoConfig = {
-    owner: fileMap.owner,
-    repo: fileMap.repo,
-    branch: fileMap.branch,
-    token: decryptedToken,
-    is_public: fileMap.is_public,
+  // 解密 token 并下载文件
+  const token = decryptToken(filemap.token_encrypted, env.AUTH_TOKEN);
+  const githubConfig = {
+    owner: filemap.owner,
+    repo: filemap.repo,
+    branch: filemap.branch,
+    token,
+    is_public: filemap.is_public
   };
 
-  // 从 GitHub 下载文件
-  let ghResponse;
-  try {
-    ghResponse = await downloadFile(repoConfig, filePath);
-  } catch (err) {
-    console.error('[Raw Download Error]', err);
-    return errorResponse(`文件下载失败: ${err.message}`, 502);
-  }
+  const content = await downloadFile(env, githubConfig, filePath);
 
-  if (!ghResponse.ok) {
-    console.error('[Raw Download Error]', ghResponse.status, ghResponse.statusText);
-    return errorResponse('文件下载失败', ghResponse.status === 404 ? 404 : 502);
-  }
-
-  // 构建响应头
+  // 设置响应头
   const filename = filePath.split('/').pop() || 'download';
   const mimeType = getMimeType(filename);
-  const isMedia = isImage(filename) || isVideo(filename);
-  const disposition = isMedia ? 'inline' : 'attachment';
+  const shouldInline = isImage(filename) || isVideo(filename);
+  const disposition = shouldInline ? 'inline' : 'attachment';
 
-  const headers = new Headers();
-  headers.set('Content-Type', mimeType);
-  headers.set(
-    'Content-Disposition',
-    `${disposition}; filename="${encodeURIComponent(filename)}"`,
-  );
-  headers.set('Cache-Control', 'public, max-age=86400, s-maxage=2592000');
-  headers.set('Access-Control-Allow-Origin', '*');
-
-  // 尝试保留 Content-Length
-  const contentLength = ghResponse.headers.get('Content-Length');
-  if (contentLength) {
-    headers.set('Content-Length', contentLength);
-  }
-
-  const newResponse = new Response(ghResponse.body, {
-    status: 200,
-    headers,
+  const response = new Response(content, {
+    headers: {
+      'Content-Type': mimeType,
+      'Cache-Control': 'public, max-age=86400',
+      'Content-Disposition': `${disposition}; filename="${filename}"`
+    }
   });
 
-  // 存入 CDN 缓存（异步执行，不阻塞响应）
-  ctx.waitUntil(
-    caches.default.put(cacheKey, newResponse.clone()).catch((err) => {
-      console.error('[Cache Put Error]', err);
-    }),
-  );
+  // 缓存到 CDN
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
 
-  return newResponse;
+  return response;
 }
 
-// ===========================================================================
-// Worker 主入口
-// ===========================================================================
-
 /**
- * Worker 主入口 — 处理所有 fetch 请求
- * @param {Request} request - 请求对象
- * @param {Object} env - 环境变量（包含 FILESHUB_KV 绑定和 AUTH_TOKEN Secret）
- * @param {Object} ctx - 执行上下文（用于 waitUntil 等）
- * @returns {Promise<Response>}
+ * Worker 主入口 - 路由分发
  */
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const method = request.method;
     const path = url.pathname;
+    const method = request.method;
 
-    // CORS 预检请求
+    // CORS 预检
     if (method === 'OPTIONS') {
       return corsResponse();
     }
 
-    try {
-      // -----------------------------------------------------------------
-      // 首页
-      // -----------------------------------------------------------------
-
-      // GET / → 返回 Web UI
-      if (path === '/' && method === 'GET') {
-        const html = renderUI(env);
-        return new Response(html, {
-          headers: { 'Content-Type': 'text/html; charset=utf-8' },
-        });
-      }
-
-      // -----------------------------------------------------------------
-      // 初始化引导（无需认证）
-      // -----------------------------------------------------------------
-
-      // GET /api/setup/status → 检查是否已初始化
-      if (path === '/api/setup/status' && method === 'GET') {
-        return await handleSetupStatus(env);
-      }
-
-      // POST /api/setup → 首次初始化
-      if (path === '/api/setup' && method === 'POST') {
-        return await handleSetup(request, env);
-      }
-
-      // -----------------------------------------------------------------
-      // 认证
-      // -----------------------------------------------------------------
-
-      // POST /api/login → 用户登录
-      if (path === '/api/login' && method === 'POST') {
-        return await handleLogin(request, env);
-      }
-
-      // POST /api/logout → 退出登录
-      if (path === '/api/logout' && method === 'POST') {
-        return await handleLogout(request, env);
-      }
-
-      // GET /api/verify → 验证会话状态
-      if (path === '/api/verify' && method === 'GET') {
-        return await handleVerify(request, env);
-      }
-
-      // -----------------------------------------------------------------
-      // 用户管理（管理员）
-      // -----------------------------------------------------------------
-
-      // GET /api/users → 用户列表
-      if (path === '/api/users' && method === 'GET') {
-        return await handleUsersList(request, env);
-      }
-
-      // POST /api/users → 创建用户
-      if (path === '/api/users' && method === 'POST') {
-        return await handleUserCreate(request, env);
-      }
-
-      // DELETE /api/users/{name} → 删除用户
-      if (path.startsWith('/api/users/') && method === 'DELETE') {
-        const targetUsername = decodeURIComponent(
-          path.slice('/api/users/'.length),
-        );
-        return await handleUserDelete(request, env, targetUsername);
-      }
-
-      // -----------------------------------------------------------------
-      // 仓库管理（已认证）
-      // -----------------------------------------------------------------
-
-      // GET/POST /api/repos → 仓库列表 / 添加仓库
-      if (path === '/api/repos' && (method === 'GET' || method === 'POST')) {
-        const { auth, error } = await checkAuth(request, env, false);
-        if (error) return error;
-        return await handleReposRequest(request, env, auth.username);
-      }
-
-      // GET /api/repos/{id}/status → 仓库状态（需在通用 repos 路由前匹配）
-      if (
-        path.match(/^\/api\/repos\/[^/]+\/status$/) &&
-        method === 'GET'
-      ) {
-        const repoId = decodeURIComponent(path.split('/')[3]);
-        const { auth, error } = await checkAuth(request, env, false);
-        if (error) return error;
-        return await handleRepoStatusRequest(
-          request,
-          env,
-          auth.username,
-          repoId,
-        );
-      }
-
-      // PUT /api/repos/{id} → 修改仓库
-      if (path.match(/^\/api\/repos\/[^/]+$/) && method === 'PUT') {
-        const repoId = decodeURIComponent(
-          path.match(/^\/api\/repos\/([^/]+)$/)[1],
-        );
-        const { auth, error } = await checkAuth(request, env, false);
-        if (error) return error;
-        return await handleRepoUpdateRequest(
-          request,
-          env,
-          auth.username,
-          repoId,
-        );
-      }
-
-      // DELETE /api/repos/{id} → 删除仓库
-      if (path.match(/^\/api\/repos\/[^/]+$/) && method === 'DELETE') {
-        const repoId = decodeURIComponent(
-          path.match(/^\/api\/repos\/([^/]+)$/)[1],
-        );
-        const { auth, error } = await checkAuth(request, env, false);
-        if (error) return error;
-        return await handleRepoDeleteRequest(
-          request,
-          env,
-          auth.username,
-          repoId,
-        );
-      }
-
-      // -----------------------------------------------------------------
-      // 文件操作（已认证）
-      // -----------------------------------------------------------------
-
-      // POST /api/upload → 上传文件
-      if (path === '/api/upload' && method === 'POST') {
-        return await handleUpload(request, env, ctx);
-      }
-
-      // GET /api/list → 文件列表
-      if (path === '/api/list' && method === 'GET') {
-        return await handleList(request, env);
-      }
-
-      // DELETE /api/delete/{path} → 删除文件
-      if (path.startsWith('/api/delete/') && method === 'DELETE') {
-        const filePath = decodeURIComponent(
-          path.slice('/api/delete/'.length),
-        );
-        return await handleDelete(request, env, filePath);
-      }
-
-      // -----------------------------------------------------------------
-      // 公开访问
-      // -----------------------------------------------------------------
-
-      // GET /raw/{path} → 下载文件（公开，CDN 缓存）
-      if (path.startsWith('/raw/') && method === 'GET') {
-        const filePath = decodeURIComponent(path.slice('/raw/'.length));
-        return await handleRaw(env, ctx, filePath);
-      }
-
-      // -----------------------------------------------------------------
-      // 404 — 未匹配的路由
-      // -----------------------------------------------------------------
-
-      return errorResponse('接口不存在', 404);
-    } catch (err) {
-      console.error('[Unhandled Error]', err);
-      return errorResponse(`服务器内部错误: ${err.message}`, 500);
+    // GET / → 渲染 UI
+    if (path === '/' && method === 'GET') {
+      return renderUI(request, env);
     }
-  },
+
+    // GET /api/setup/status → 系统初始化状态
+    if (path === '/api/setup/status' && method === 'GET') {
+      return handleSetupStatus(env);
+    }
+
+    // POST /api/setup → 系统初始化
+    if (path === '/api/setup' && method === 'POST') {
+      return handleSetup(request, env);
+    }
+
+    // POST /api/login → 登录
+    if (path === '/api/login' && method === 'POST') {
+      return handleLogin(request, env);
+    }
+
+    // POST /api/logout → 登出
+    if (path === '/api/logout' && method === 'POST') {
+      return handleLogout(request, env);
+    }
+
+    // GET /api/verify → 验证登录状态
+    if (path === '/api/verify' && method === 'GET') {
+      return handleVerify(request, env);
+    }
+
+    // GET /api/users → 用户列表（管理员）
+    if (path === '/api/users' && method === 'GET') {
+      return handleUsersList(request, env);
+    }
+
+    // POST /api/users → 创建用户（管理员）
+    if (path === '/api/users' && method === 'POST') {
+      return handleUserCreate(request, env);
+    }
+
+    // DELETE /api/users/{name} → 删除用户（管理员）
+    const userMatch = path.match(/^\/api\/users\/([^/]+)$/);
+    if (userMatch && method === 'DELETE') {
+      const targetUsername = decodeURIComponent(userMatch[1]);
+      return handleUserDelete(request, env, targetUsername);
+    }
+
+    // GET/POST /api/repos → 仓库列表/创建（需认证）
+    if (path === '/api/repos' && (method === 'GET' || method === 'POST')) {
+      const { auth, error } = await checkAuth(request, env);
+      if (error) return error;
+      return handleReposRequest(request, env, auth.username);
+    }
+
+    // GET /api/repos/{id}/status → 仓库状态（需认证）
+    // 必须在 /api/repos/{id} 之前匹配
+    const repoStatusMatch = path.match(/^\/api\/repos\/[^/]+\/status$/);
+    if (repoStatusMatch && method === 'GET') {
+      const { auth, error } = await checkAuth(request, env);
+      if (error) return error;
+      const repoId = decodeURIComponent(path.split('/')[3]);
+      return handleRepoStatusRequest(request, env, auth.username, repoId);
+    }
+
+    // PUT /api/repos/{id} → 更新仓库（需认证）
+    const repoIdMatch = path.match(/^\/api\/repos\/([^/]+)$/);
+    if (repoIdMatch && method === 'PUT') {
+      const { auth, error } = await checkAuth(request, env);
+      if (error) return error;
+      const repoId = decodeURIComponent(repoIdMatch[1]);
+      return handleRepoUpdateRequest(request, env, auth.username, repoId);
+    }
+
+    // DELETE /api/repos/{id} → 删除仓库（需认证）
+    if (repoIdMatch && method === 'DELETE') {
+      const { auth, error } = await checkAuth(request, env);
+      if (error) return error;
+      const repoId = decodeURIComponent(repoIdMatch[1]);
+      return handleRepoDeleteRequest(request, env, auth.username, repoId);
+    }
+
+    // POST /api/upload → 文件上传（需认证）
+    if (path === '/api/upload' && method === 'POST') {
+      return handleUpload(request, env, ctx);
+    }
+
+    // GET /api/list → 文件列表（需认证）
+    if (path === '/api/list' && method === 'GET') {
+      return handleList(request, env);
+    }
+
+    // DELETE /api/delete/{path} → 删除文件（需认证）
+    if (path.startsWith('/api/delete/') && method === 'DELETE') {
+      const filePath = decodeURIComponent(path.slice('/api/delete/'.length));
+      return handleDelete(request, env, filePath);
+    }
+
+    // GET /raw/{path} → 原始文件访问（公开）
+    if (path.startsWith('/raw/')) {
+      const filePath = decodeURIComponent(path.slice('/raw/'.length));
+      return handleRaw(env, ctx, filePath);
+    }
+
+    return errorResponse('未找到', 404);
+  }
 };
