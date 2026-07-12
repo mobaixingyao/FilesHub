@@ -1,5 +1,25 @@
 {
   "name": "fileshub",
+<<<<<<< HEAD
+  "version": "2.0.0",
+  "type": "module",
+  "description": "基于 Cloudflare Workers + GitHub 多仓库的文件床系统",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "github",
+    "file-hosting",
+    "kv"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+=======
   "version": "1.0.0",
   "description": "基于 GitHub 私有仓库 + Cloudflare Workers 的文件床",
   "private": true,
@@ -12,5 +32,6 @@
   },
   "devDependencies": {
     "wrangler": "^3.90.0"
+>>>>>>> 956176d14c8744fc5056b0c98a323ee4d5e39d36
   }
 }
