@@ -6,8 +6,8 @@ compatibility_date = "2024-09-23"
 SITE_TITLE = "FilesHub"
 
 [[kv_namespaces]]
-binding = "FILESHUB_KV"
-id = "YOUR_KV_NAMESPACE_ID"
+#binding = "FILESHUB_KV"
+#id = "YOUR_KV_NAMESPACE_ID"
 
 # Secrets (wrangler secret put):
 # AUTH_TOKEN → AES-GCM 加密密钥
