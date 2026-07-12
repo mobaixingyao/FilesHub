@@ -71,9 +71,24 @@ function extractToken(request, url) {
 // ============================================================
 
 /**
- * 健康检查
+ * 验证 AUTH_TOKEN 是否正确（专供登录页使用）
+ * 只校验令牌，不调用 GitHub API
  */
-async function handleHealth(env) {
+function handleVerify(request, env) {
+  if (!env.AUTH_TOKEN) {
+    // 未设置 AUTH_TOKEN，任何人都能访问
+    return jsonResponse({ success: true, message: '未设置 AUTH_TOKEN，免认证模式' });
+  }
+  if (!checkAuth(request, env)) {
+    return errorResponse('令牌无效', 401);
+  }
+  return jsonResponse({ success: true, message: '认证成功' });
+}
+
+/**
+ * 健康检查（需认证，防止未授权探测）
+ */
+async function handleHealth(request, env) {
   try {
     const repoInfo = await getRepoInfo(env);
     return jsonResponse({
@@ -385,9 +400,17 @@ export default {
         });
       }
 
-      // 健康检查
+      // 验证令牌（登录页使用）
+      if (method === 'GET' && path === '/api/verify') {
+        return handleVerify(request, env);
+      }
+
+      // 健康检查（需认证）
       if (method === 'GET' && path === '/api/health') {
-        return handleHealth(env);
+        if (!checkAuth(request, env)) {
+          return errorResponse('认证失败：需要 AUTH_TOKEN', 401);
+        }
+        return handleHealth(request, env);
       }
 
       // 上传文件
