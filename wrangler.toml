@@ -2,12 +2,20 @@ name = "fileshub"
 main = "src/index.js"
 compatibility_date = "2024-09-23"
 
+# ============================================================
+# Deploy Guide / 部署指南
+#
+# 1. Create KV Namespace / 创建 KV 命名空间:
+#    Dashboard -> Workers & Pages -> KV -> Create namespace
+#    Name: FILESHUB_KV, then copy the ID to the field below
+#
+# 2. Set Secret (Dashboard -> Workers -> fileshub -> Settings -> Variables):
+#    AUTH_TOKEN = your random string (32+ chars recommended)
+# ============================================================
+
 [vars]
 SITE_TITLE = "FilesHub"
 
-#[[kv_namespaces]]
-#binding = "FILESHUB_KV"
-#id = "YOUR_KV_NAMESPACE_ID"
-
-# Secrets (wrangler secret put):
-# AUTH_TOKEN → AES-GCM 加密密钥
+[[kv_namespaces]]
+binding = "FILESHUB_KV"
+id = "REPLACE_WITH_YOUR_KV_ID"
