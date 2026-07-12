@@ -1,0 +1,16 @@
+{
+  "name": "fileshub",
+  "version": "1.0.0",
+  "description": "基于 GitHub 私有仓库 + Cloudflare Workers 的文件床",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "secret:token": "wrangler secret put GITHUB_TOKEN",
+    "secret:auth": "wrangler secret put AUTH_TOKEN"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
