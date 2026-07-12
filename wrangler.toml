@@ -5,8 +5,8 @@ compatibility_date = "2024-09-23"
 # 静态环境变量（非敏感信息）
 # 敏感信息请使用 `wrangler secret put` 设置
 [vars]
-GITHUB_OWNER = "your-github-username"
-GITHUB_REPO = "your-file-storage-repo"
+# GITHUB_OWNER = "your-github-username"(输入你的github用户名)
+# GITHUB_REPO = "your-file-storage-repo"(输入你的仓库名)
 GITHUB_BRANCH = "main"
 SITE_TITLE = "FilesHub"
 # 是否允许公开访问文件列表 API（下载 /raw/* 始终公开）
